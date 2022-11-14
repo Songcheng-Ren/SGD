@@ -642,7 +642,7 @@ csv_file2.close()
 print("Done!")
 ```
 
-实验二，控制其它变量不变，选择SGD优化器并使用参数momentum,设为0.9，使用参数nesterov，设置为True
+实验三，控制其它变量不变，选择SGD优化器并使用参数momentum,设为0.9，使用参数nesterov，设置为True
 
 
 ```python
