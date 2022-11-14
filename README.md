@@ -99,88 +99,7 @@ $$\theta_{j+1}=\theta_j-\alpha\frac 1m\sum_{i=1}^m(h_\theta(x^{(i)})-y^{(i)})x_j
 首先查找MindSpore官方文档，找到SGD优化器的API文档。
 网址：https://www.mindspore.cn/docs/zh-CN/r1.9/api_python/nn/mindspore.nn.SGD.html#mindspore.nn.SGD
 
-
-```python
-from mindspore.ops import functional as F, composite as C, operations as P
-from mindspore.common.parameter import Parameter
-from mindspore.common.tensor import Tensor
-import mindspore.common.dtype as mstype
-from mindspore._checkparam import Validator as validator
-from .optimizer import Optimizer
-from .optimizer import opt_init_args_register
-
-_sgd_opt = C.MultitypeFuncGraph("sgd_opt")
-
-
-@_sgd_opt.register("Function", "Tensor", "Tensor", "Tensor", "Tensor", "Tensor", "Tensor")
-def _tensor_run_opt_ext(opt, momentum, learning_rate, gradient, weight, accum, stat):
-    """Apply sgd optimizer to the weight parameter using Tensor."""
-    success = True
-    success = F.depend(success, opt(weight, gradient, learning_rate, accum, momentum, stat))
-    return success
-
-
-class SGD(Optimizer):
-    @opt_init_args_register
-    def __init__(self, params, learning_rate=0.1, momentum=0.0, dampening=0.0, weight_decay=0.0, nesterov=False,
-                 loss_scale=1.0):
-
-        super(SGD, self).__init__(learning_rate, params, weight_decay, loss_scale)
-
-        if isinstance(momentum, int):
-            momentum = float(momentum)
-        if not isinstance(momentum, float):
-            raise TypeError("For 'SGD', the argument 'momentum' should be float type, "
-                            "but got {}.".format(type(momentum)))
-
-        if isinstance(momentum, float) and momentum < 0.0:
-            raise ValueError("For 'SGD', the argument 'momentum' should be at least 0.0, "
-                             "but got {}".format(momentum))
-
-        if isinstance(dampening, int):
-            dampening = float(dampening)
-        if not isinstance(dampening, float):
-            raise TypeError("For 'SGD', the argument 'dampening' should be float type, "
-                            "but got {}.".format(type(dampening)))
-
-        if dampening < 0.0:
-            raise ValueError("For 'SGD', the argument 'dampening' should be at least 0.0, "
-                             "but got 'dampening' {}".format(dampening))
-        self.dampening = dampening
-
-        if isinstance(weight_decay, int):
-            weight_decay = float(weight_decay)
-
-        validator.check_value_type("nesterov", nesterov, [bool], self.cls_name)
-
-        if nesterov and (momentum <= 0.0 or dampening != 0.0):
-            raise ValueError("For 'SGD', if 'nesterov' is true, 'momentum' must be > 0.0 and 'dampening' must "
-                             "equal to 0.0, but got 'momentum' {}, 'dampening' {}".format(momentum, dampening))
-        self.nesterov = nesterov
-
-        self.opt = P.SGD(dampening, weight_decay, nesterov)
-
-        self.momentum = Parameter(Tensor(momentum, mstype.float32), name="momentum")
-        self.accum = self.parameters.clone(prefix="accum", init='zeros')
-        self.stat = self.parameters.clone(prefix="stat", init='ones')
-
-    def construct(self, gradients):
-        params = self.parameters
-        accum = self.accum
-        stat = self.stat
-        gradients = self.gradients_centralization(gradients)
-        gradients = self.scale_grad(gradients)
-        lr = self.get_lr()
-        if self.is_group_lr:
-            success = self.hyper_map_reverse(F.partial(_sgd_opt, self.opt, self.momentum),
-                                             lr, gradients, params, accum, stat)
-        else:
-            success = self.hyper_map_reverse(F.partial(_sgd_opt, self.opt, self.momentum, lr),
-                                             gradients, params, accum, stat)
-        return success
-```
-
-根据以上源码以及API文档，我们发现MindSpore对SGD优化器已经使用了不少优化方法，有momentum,dampening,nesterov,weight-decay,gradients_centralization等。我们一一讲解。
+根据源码以及API文档，我们发现MindSpore对SGD优化器已经使用了不少优化方法，有momentum,dampening,nesterov,weight-decay,gradients_centralization等。我们一一讲解。
 
 ### 2.2 momentum
 
@@ -278,39 +197,8 @@ $$\Phi_{GC}(\nabla_{w_i}\mathcal{L})=\nabla_{w_i}\mathcal{L}-\mu\nabla_{w_i}\mat
 回到源代码，根据API文档，在params参数中可以选择是否使用grad_centralization 。在SGD优化器的具体实现（construct函数）中，使用了grad_centralization。
 
 
-
-```python
-gradients = self.gradients_centralization(gradients)
-```
-
 ### 2.7 如何使用SGD优化器
-在实践中，我们需要调用MindSpore提供的SGD优化器接口，根据需要并查找文档，选取合适的参数。至于参数值，则需要用户自己慢慢调参了。这是官网给出的样例，可以参照这个初步了解优化器的用法。
-
-
-```python
-import mindspore as ms
-from mindspore import nn
-
-net = Net()
-#1) All parameters use the same learning rate and weight decay
-optim = nn.SGD(params=net.trainable_params())
-
-#2) Use parameter groups and set different values
-conv_params = list(filter(lambda x: 'conv' in x.name, net.trainable_params()))
-no_conv_params = list(filter(lambda x: 'conv' not in x.name, net.trainable_params()))
-group_params = [{'params': conv_params,'grad_centralization':True},
-                {'params': no_conv_params, 'lr': 0.01},
-                {'order_params': net.trainable_params()}]
-optim = nn.SGD(group_params, learning_rate=0.1, weight_decay=0.0)
-# The conv_params's parameters will use default learning rate of 0.1 and default weight decay of 0.0
-# and grad centralization of True.
-# The no_conv_params's parameters will use learning rate of 0.01 and default weight decay of 0.0 and grad
-# centralization of False.
-# The final parameters order in which the optimizer will be followed is the value of 'order_params'.
-
-loss = nn.SoftmaxCrossEntropyWithLogits()
-model = ms.Model(net, loss_fn=loss, optimizer=optim)
-```
+在实践中，我们需要调用MindSpore提供的SGD优化器接口，根据需要并查找文档，选取合适的参数。至于参数值，则需要用户自己慢慢调参了。
 
 ## 3 SGD应用案例
 
@@ -409,6 +297,7 @@ network = lenet(num_classes=10, num_channel=1, include_top=True)
 
 ```python
 from mindspore import ops
+from mindspore import nn
 # 定义训练函数
 def train(model, dataset, loss_fn, optimizer):
     # Define forward function
@@ -463,6 +352,7 @@ def test(model, dataset, loss_fn, writer):
 ```python
 import csv
 from mindvision.classification.models import lenet
+from mindspore import nn
 # 构建网络模型
 network1 = lenet(num_classes=10, num_channel=1, include_top=True)
 
@@ -484,12 +374,256 @@ csv_file1.close()
 print("Done!")
 ```
 
+    Epoch 1
+    -------------------------------
+    loss: 2.302577  [  0/1875]
+    loss: 2.302847  [100/1875]
+    loss: 2.302751  [200/1875]
+    loss: 2.302980  [300/1875]
+    loss: 2.303654  [400/1875]
+    loss: 2.303366  [500/1875]
+    loss: 2.304052  [600/1875]
+    loss: 2.302124  [700/1875]
+    loss: 2.300979  [800/1875]
+    loss: 2.305120  [900/1875]
+    loss: 2.302595  [1000/1875]
+    loss: 2.302863  [1100/1875]
+    loss: 2.302272  [1200/1875]
+    loss: 2.302855  [1300/1875]
+    loss: 2.301332  [1400/1875]
+    loss: 2.302946  [1500/1875]
+    loss: 2.302062  [1600/1875]
+    loss: 2.301753  [1700/1875]
+    loss: 2.302556  [1800/1875]
+    Test: 
+     Accuracy: 10.0%, Avg loss: 2.302537 
+    
+    Epoch 2
+    -------------------------------
+    loss: 2.302315  [  0/1875]
+    loss: 2.302679  [100/1875]
+    loss: 2.303077  [200/1875]
+    loss: 2.302937  [300/1875]
+    loss: 2.303362  [400/1875]
+    loss: 2.303807  [500/1875]
+    loss: 2.301589  [600/1875]
+    loss: 2.301368  [700/1875]
+    loss: 2.299467  [800/1875]
+    loss: 2.304304  [900/1875]
+    loss: 2.303492  [1000/1875]
+    loss: 2.303529  [1100/1875]
+    loss: 2.304138  [1200/1875]
+    loss: 2.301667  [1300/1875]
+    loss: 2.301730  [1400/1875]
+    loss: 2.303048  [1500/1875]
+    loss: 2.303775  [1600/1875]
+    loss: 2.303029  [1700/1875]
+    loss: 2.302475  [1800/1875]
+    Test: 
+     Accuracy: 16.2%, Avg loss: 2.302400 
+    
+    Epoch 3
+    -------------------------------
+    loss: 2.301794  [  0/1875]
+    loss: 2.303500  [100/1875]
+    loss: 2.302805  [200/1875]
+    loss: 2.302227  [300/1875]
+    loss: 2.301216  [400/1875]
+    loss: 2.302775  [500/1875]
+    loss: 2.301936  [600/1875]
+    loss: 2.302594  [700/1875]
+    loss: 2.302720  [800/1875]
+    loss: 2.302242  [900/1875]
+    loss: 2.303227  [1000/1875]
+    loss: 2.301566  [1100/1875]
+    loss: 2.301122  [1200/1875]
+    loss: 2.301184  [1300/1875]
+    loss: 2.299739  [1400/1875]
+    loss: 2.302099  [1500/1875]
+    loss: 2.301378  [1600/1875]
+    loss: 2.299140  [1700/1875]
+    loss: 2.298317  [1800/1875]
+    Test: 
+     Accuracy: 19.9%, Avg loss: 2.299189 
+    
+    Epoch 4
+    -------------------------------
+    loss: 2.298693  [  0/1875]
+    loss: 2.298517  [100/1875]
+    loss: 2.295070  [200/1875]
+    loss: 2.287685  [300/1875]
+    loss: 2.273570  [400/1875]
+    loss: 2.171952  [500/1875]
+    loss: 1.555109  [600/1875]
+    loss: 1.315035  [700/1875]
+    loss: 1.290831  [800/1875]
+    loss: 0.957171  [900/1875]
+    loss: 0.683247  [1000/1875]
+    loss: 1.657022  [1100/1875]
+    loss: 0.885075  [1200/1875]
+    loss: 0.906517  [1300/1875]
+    loss: 0.904378  [1400/1875]
+    loss: 1.017345  [1500/1875]
+    loss: 1.311617  [1600/1875]
+    loss: 0.797807  [1700/1875]
+    loss: 0.899135  [1800/1875]
+    Test: 
+     Accuracy: 69.3%, Avg loss: 0.824970 
+    
+    Epoch 5
+    -------------------------------
+    loss: 0.632757  [  0/1875]
+    loss: 0.734659  [100/1875]
+    loss: 0.945924  [200/1875]
+    loss: 0.672319  [300/1875]
+    loss: 0.684902  [400/1875]
+    loss: 0.706946  [500/1875]
+    loss: 0.759072  [600/1875]
+    loss: 0.552457  [700/1875]
+    loss: 0.529598  [800/1875]
+    loss: 1.010510  [900/1875]
+    loss: 0.701660  [1000/1875]
+    loss: 0.749967  [1100/1875]
+    loss: 0.557507  [1200/1875]
+    loss: 0.663519  [1300/1875]
+    loss: 0.856946  [1400/1875]
+    loss: 0.672521  [1500/1875]
+    loss: 0.620852  [1600/1875]
+    loss: 0.940065  [1700/1875]
+    loss: 0.525178  [1800/1875]
+    Test: 
+     Accuracy: 74.8%, Avg loss: 0.673452 
+    
+    Epoch 6
+    -------------------------------
+    loss: 0.526541  [  0/1875]
+    loss: 0.551981  [100/1875]
+    loss: 0.437927  [200/1875]
+    loss: 0.536838  [300/1875]
+    loss: 0.612873  [400/1875]
+    loss: 0.663827  [500/1875]
+    loss: 0.462745  [600/1875]
+    loss: 0.553594  [700/1875]
+    loss: 0.411590  [800/1875]
+    loss: 0.748116  [900/1875]
+    loss: 0.510949  [1000/1875]
+    loss: 0.381978  [1100/1875]
+    loss: 0.571769  [1200/1875]
+    loss: 0.576415  [1300/1875]
+    loss: 0.674996  [1400/1875]
+    loss: 0.657864  [1500/1875]
+    loss: 0.638442  [1600/1875]
+    loss: 0.409129  [1700/1875]
+    loss: 0.637906  [1800/1875]
+    Test: 
+     Accuracy: 78.8%, Avg loss: 0.573736 
+    
+    Epoch 7
+    -------------------------------
+    loss: 0.303391  [  0/1875]
+    loss: 0.386003  [100/1875]
+    loss: 0.689905  [200/1875]
+    loss: 0.512580  [300/1875]
+    loss: 0.466622  [400/1875]
+    loss: 0.435113  [500/1875]
+    loss: 0.432267  [600/1875]
+    loss: 0.504910  [700/1875]
+    loss: 0.666079  [800/1875]
+    loss: 0.614079  [900/1875]
+    loss: 0.400944  [1000/1875]
+    loss: 0.448082  [1100/1875]
+    loss: 0.767068  [1200/1875]
+    loss: 0.498046  [1300/1875]
+    loss: 0.530967  [1400/1875]
+    loss: 0.754128  [1500/1875]
+    loss: 0.558144  [1600/1875]
+    loss: 0.258042  [1700/1875]
+    loss: 0.358890  [1800/1875]
+    Test: 
+     Accuracy: 81.6%, Avg loss: 0.510896 
+    
+    Epoch 8
+    -------------------------------
+    loss: 0.506675  [  0/1875]
+    loss: 0.753561  [100/1875]
+    loss: 0.468868  [200/1875]
+    loss: 0.422411  [300/1875]
+    loss: 0.396021  [400/1875]
+    loss: 0.393111  [500/1875]
+    loss: 0.963203  [600/1875]
+    loss: 0.572667  [700/1875]
+    loss: 0.288582  [800/1875]
+    loss: 0.419174  [900/1875]
+    loss: 0.356242  [1000/1875]
+    loss: 0.464459  [1100/1875]
+    loss: 0.501630  [1200/1875]
+    loss: 0.593385  [1300/1875]
+    loss: 0.398698  [1400/1875]
+    loss: 0.774741  [1500/1875]
+    loss: 0.300537  [1600/1875]
+    loss: 0.626626  [1700/1875]
+    loss: 0.468578  [1800/1875]
+    Test: 
+     Accuracy: 80.9%, Avg loss: 0.520291 
+    
+    Epoch 9
+    -------------------------------
+    loss: 0.393862  [  0/1875]
+    loss: 0.242075  [100/1875]
+    loss: 0.380720  [200/1875]
+    loss: 0.613354  [300/1875]
+    loss: 0.313823  [400/1875]
+    loss: 0.708381  [500/1875]
+    loss: 0.501862  [600/1875]
+    loss: 0.367467  [700/1875]
+    loss: 0.601890  [800/1875]
+    loss: 0.417870  [900/1875]
+    loss: 0.465760  [1000/1875]
+    loss: 0.626054  [1100/1875]
+    loss: 0.564844  [1200/1875]
+    loss: 0.439832  [1300/1875]
+    loss: 0.247064  [1400/1875]
+    loss: 0.210835  [1500/1875]
+    loss: 0.672299  [1600/1875]
+    loss: 0.483748  [1700/1875]
+    loss: 0.694968  [1800/1875]
+    Test: 
+     Accuracy: 83.5%, Avg loss: 0.455580 
+    
+    Epoch 10
+    -------------------------------
+    loss: 0.391544  [  0/1875]
+    loss: 0.305324  [100/1875]
+    loss: 0.416478  [200/1875]
+    loss: 0.437293  [300/1875]
+    loss: 0.253441  [400/1875]
+    loss: 0.500829  [500/1875]
+    loss: 0.511331  [600/1875]
+    loss: 0.390801  [700/1875]
+    loss: 0.466885  [800/1875]
+    loss: 0.345322  [900/1875]
+    loss: 0.454487  [1000/1875]
+    loss: 0.409122  [1100/1875]
+    loss: 0.191410  [1200/1875]
+    loss: 0.507366  [1300/1875]
+    loss: 0.580812  [1400/1875]
+    loss: 0.367076  [1500/1875]
+    loss: 0.314957  [1600/1875]
+    loss: 0.409756  [1700/1875]
+    loss: 0.368590  [1800/1875]
+    Test: 
+     Accuracy: 84.0%, Avg loss: 0.436875 
+    
+    Done!
+    
+
 实验二，控制其它变量不变，选择SGD优化器并使用参数momentum,设为0.9
 
 
 ```python
 import csv
 from mindvision.classification.models import lenet
+from mindspore import nn
 
 network2 = lenet(num_classes=10, num_channel=1, include_top=True)
 net_loss = nn.SoftmaxCrossEntropyWithLogits(sparse=True, reduction='mean')
@@ -514,6 +648,7 @@ print("Done!")
 ```python
 import csv
 from mindvision.classification.models import lenet
+from mindspore import nn
 
 network3 = lenet(num_classes=10, num_channel=1, include_top=True)
 net_loss = nn.SoftmaxCrossEntropyWithLogits(sparse=True, reduction='mean')
@@ -585,12 +720,6 @@ plt.savefig("sgd不同参数精确度对比图.png")
 plt.show()  # 显示折线图
 ```
 
-
-    
-![png](SGD_files/SGD_56_0.png)
-    
-
-
 这是笔者训练的结果：
 ![avatar](image/sgd不同参数精确度对比图.png)
 
@@ -641,12 +770,6 @@ plt.legend()
 plt.savefig("sgd不同参数损失对比图.png")
 plt.show()  # 显示折线图
 ```
-
-
-    
-![png](SGD_files/SGD_59_0.png)
-    
-
 
 这是笔者训练的结果：
 ![avatar](image/sgd不同参数损失对比图.png)
